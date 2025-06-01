@@ -1,0 +1,43 @@
+🧠 Smart UX & Functional Features
+✅ 1. CSV Validation Before Submission
+    Warn users if any required fields are missing or if dates are invalid before processing.
+
+    Show a popup (not just log output) if validation fails.
+
+✅ 2. Preview Mode (Dry Run)
+    Add a "Preview Entries" button that opens a new window or displays a summary (maybe in a Text or Treeview widget) of what will be submitted.
+
+    Useful for catching errors before they’re sent to the server.
+
+🔐 3. Encrypted Credential Storage
+    If you’re storing credentials:
+
+    Use cryptography.fernet to encrypt credentials locally.
+
+    Add a "Forget credentials" button for users to clear saved logins.
+
+📊 4. Submission Summary at the End
+    At the end of a run, show:
+
+    Total active days submitted
+
+    Total OFF days auto-filled
+
+    Total failures (if any)
+
+    A summary box or log window with colored status per day
+
+🖼️ 5. Improve GUI with Treeview for Log
+    Use ttk.Treeview or a styled Text widget to color-code logs clearly:
+
+    ✅ = green
+
+    ❌ = red
+
+    🟡 = yellow
+
+📤 8. Export Logs to File
+    Give users a way to export the session log to a .txt file.
+
+🛠️ 10. "Test Login" Button
+    A button that only tries logging in and retrieving cookies/headerID, to verify credentials without processing data.
