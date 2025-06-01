@@ -4,3 +4,5 @@ Enrichment-LogBook.csv
 GUI.spec
 build
 dist/app.txt
+data.json
+dist/data.json

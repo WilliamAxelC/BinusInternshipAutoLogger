@@ -8,6 +8,7 @@ import os
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 import sys
+import json
 
 # For PyInstaller -- resolve the path correctly
 def get_runtime_browser_path():
@@ -22,7 +23,6 @@ browser_path = get_runtime_browser_path()
 if browser_path:
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_path
 
-# Step 1: Define the async Playwright task
 async def launch_and_get_cookie_and_header_async(email, password):
     log_message("Starting Playwright task...")
 
@@ -136,25 +136,30 @@ async def launch_and_get_cookie_and_header_async(email, password):
 
     except Exception as e:
         log_message(f"  Error in Playwright task: {e}")
+        log_message("❌❌❌ Something went wrong! Please re-run the process. 🛠️🔄")
         raise
 
 
 # File to store credentials
-CREDENTIALS_FILE = "app.txt"
+CREDENTIALS_FILE = "data.json"
 
 # Function to save credentials
 def save_credentials(email, password):
+    data = {
+        "email": email,
+        "password": password
+    }
     with open(CREDENTIALS_FILE, 'w') as file:
-        file.write(f"{email}\n{password}\n")
+        json.dump(data, file)
 
 # Function to load credentials if available
 def load_credentials():
     if os.path.exists(CREDENTIALS_FILE):
         with open(CREDENTIALS_FILE, 'r') as file:
-            email = file.readline().strip()
-            password = file.readline().strip()
-            return email, password
+            data = json.load(file)
+            return data.get("email"), data.get("password")
     return None, None
+
 
 
 # Step 2: Tkinter Dialog to get credentials
@@ -433,10 +438,6 @@ def get_cookie_and_header():
         if dialog.result:
             email, password, remember_me = dialog.result
             on_credentials_gathered(email, password, remember_me)
-
-
-
-
 
 
 # === Build GUI ===
