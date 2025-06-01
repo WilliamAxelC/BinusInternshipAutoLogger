@@ -1,7 +1,8 @@
 app.txt
 AutomaticCookie.py
 Enrichment-LogBook.csv
-GUI.spec
+BinusInternshipAutoLog.spec
+debug_log.txt
 build
 dist/app.txt
 data.json

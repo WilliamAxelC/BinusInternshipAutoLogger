@@ -9,6 +9,12 @@ from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 import sys
 import json
+from collections import defaultdict
+
+cookie = None
+month_header_dict = None
+last_browser = None  # Global variable to hold the previous browser instance
+debugging_mode = os.environ.get("DEBUG_MODE", "false").lower() == "true"
 
 # For PyInstaller -- resolve the path correctly
 def get_runtime_browser_path():
@@ -25,12 +31,23 @@ if browser_path:
 
 async def launch_and_get_cookie_and_header_async(email, password):
     log_message("Starting Playwright task...")
+    global last_browser
 
     try:
         async with async_playwright() as p:
+                # Close previous browser if it exists
+            if last_browser:
+                log_message("🔁 Closing previous browser instance...")
+                try:
+                    await last_browser.close()
+                    log_message("✅ Previous browser closed.")
+                except Exception as e:
+                    log_message(f"⚠️ Error closing previous browser: {e}")
+                last_browser = None
             log_message("   Launching Headless browser...")
 
             browser = await p.webkit.launch(headless=True)
+            last_browser = browser  # Store the reference to this new browser
             context = await browser.new_context()
             page = await context.new_page()
 
@@ -67,27 +84,25 @@ async def launch_and_get_cookie_and_header_async(email, password):
             except:
                 log_message("   'No' button not found or not clickable.")
 
-            log_message("   Waiting for login confirmation button to appear...")
+            log_message("   Waiting for 'Go to Activity Enrichment Apps' button...")
 
             try:
-            # Wait up to 3 minutes for the button with href containing '/SSOToActivity'
-                await page.wait_for_selector('a.button-orange[href*="/SSOToActivity"]', timeout=180000)
-                log_message("   'Go to Activity Enrichment Apps' button found, scrolling into view...")
+                # Wait up to 3 minutes for the button to be visible
+                button_selector = 'a.button-orange[href*="/SSOToActivity"]'
+                await page.wait_for_selector(button_selector, timeout=20000, state='visible')
+                log_message("   Button found, scrolling into view and clicking...")
 
-                # Scroll it into view
-                await page.evaluate('''() => {
-                    const el = document.querySelector('a.button-orange[href*="/SSOToActivity"]');
-                    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-                }''')
+                # Scroll the button into view properly
+                await page.eval_on_selector(button_selector, "el => el.scrollIntoView({ behavior: 'smooth', block: 'center' })")
+                await page.wait_for_timeout(500)  # Allow time for scroll animation
 
-                await page.wait_for_timeout(1000)  # allow time for scroll
-
-                log_message("   Clicking the 'Go to Activity Enrichment Apps' button...")
-                await page.click('a.button-orange[href*="/SSOToActivity"]')
-            except:
-                log_message("   ❌ 'Go to Activity Enrichment Apps' button not found within 3 minutes.")
+                # Click the button
+                await page.click(button_selector, force=True)
+                log_message("   Clicked 'Go to Activity Enrichment Apps' button.")
+            except Exception as e:
+                log_message(f"   ❌ Button click failed: {e}")
+                log_message("❌❌❌ Something went wrong! Please click on 'Fetch Cookies & Header ID' again. 🛠️🔄")
                 return None, None
-
 
 
             # Step 7: Account selection
@@ -102,26 +117,46 @@ async def launch_and_get_cookie_and_header_async(email, password):
             log_message("   LogBook button found, clicking it...")
             await page.click("#btnLogBook")
 
-            # Capture GetLogBook response
-            header_id = None
+            # Step 6: Wait for month tabs to appear
+            log_message("   Waiting for month tabs...")
+            await page.wait_for_selector('#monthTab')
 
-            async def handle_response(response):
-                nonlocal header_id
-                if "GetLogBook" in response.url:
-                    log_message("   GetLogBook response received.")
-                    try:
-                        # Await response.json() properly to get the data
-                        json_data = await response.json()
-                        if json_data["data"]:
-                            header_id = json_data["data"][0]["logBookHeaderID"]
-                            log_message(f"  LogBookHeaderID retrieved: {header_id}")
-                    except Exception as e:
-                        log_message(f"  Error parsing response: {e}")
+            # Extract the months and onclick header ids
+            month_header_dict = {}
+            
+            # Wait for the overlay to disappear (use a timeout of 5 seconds)
+            log_message("   Waiting for overlay to disappear...")
+            await page.wait_for_selector('.fancybox-overlay', state='hidden', timeout=5000)
 
-            page.on("response", handle_response)
-            await page.wait_for_timeout(3000)  # Wait for the response
+            # Loop through each month <a> tag and click it to extract the onclick id
+            month_elements = await page.query_selector_all('#monthTab li a')
+            log_message(f"   Found {len(month_elements)} month elements.")
+            
+            for month_element in month_elements:
+                # Extract month name and strip extra spaces
+                month_name = await month_element.inner_text()
+                month_name = month_name.strip()
 
-            if not header_id:
+                month_name = month_name.replace(' ●', '').strip()  # This will remove the circle character
+
+
+                # Click on the month element
+                log_message(f"   Clicking on {month_name}...")
+                await month_element.click()
+
+                # Extract the onclick header ID after clicking
+                header_id = await page.evaluate('''(el) => {
+                    const onclick = el.getAttribute('onclick');
+                    return onclick ? onclick.split("'")[1] : null;
+                }''', month_element)
+
+                if header_id:
+                    month_header_dict[month_name] = header_id
+                    log_message(f"   Mapped {month_name} to {header_id}")
+
+            log_message(f"   Extracted month-header pairs: {month_header_dict}")
+
+            if not month_header_dict:
                 log_message("   No LogBookHeaderID received.")
 
             # Extract cookies
@@ -132,13 +167,31 @@ async def launch_and_get_cookie_and_header_async(email, password):
 
             await browser.close()
             log_message("   Browser closed.")
-            return cookie_header, header_id
+            return cookie_header, month_header_dict
 
     except Exception as e:
         log_message(f"  Error in Playwright task: {e}")
-        log_message("❌❌❌ Something went wrong! Please re-run the process. 🛠️🔄")
         raise
 
+
+def get_header_id_for_date(month_header_dict, date_str):
+    # If date_str is already a datetime object, use it directly
+    if isinstance(date_str, datetime):
+        date_obj = date_str
+    else:
+        # Otherwise, assume it's a string and parse it
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+
+    # Extract the month from the date
+    month_name = date_obj.strftime("%B")  # Get full month name (e.g., "January")
+    month_name = month_name.upper()
+
+    # Retrieve the corresponding headerID for the month
+    header_id = month_header_dict.get(month_name)
+    if not header_id:
+        log_message(f"❌ No headerID found for month: {month_name}")
+        return None
+    return header_id
 
 # File to store credentials
 CREDENTIALS_FILE = "data.json"
@@ -216,6 +269,7 @@ def fetch_existing_entries(header_id, cookie):
             headers=headers,
             data={"logBookHeaderID": header_id}
         )
+
         response.raise_for_status()
         data = response.json().get("data", [])
         return {entry["date"][:10]: entry["id"] for entry in data}
@@ -225,11 +279,43 @@ def fetch_existing_entries(header_id, cookie):
 
 
 def log_message(message):
-    print(message)
-    output_box.insert(tk.END, message + '\n')
+    if debugging_mode == True:
+        prefix = "[DEBUG]"
+    else:
+        prefix = "[INFO]"
+
+    message = f"{prefix} {message}"
+
+    if "✅" in message:
+        color = "green"
+    elif "❌" in message or "⚠️" in message:
+        color = "red"
+    elif "[DEBUG]" in message:
+        color = "blue"
+    else:
+        color = "black"
+        
+    timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    full_message = f"{timestamp} {message}"
+    print(full_message)
+
+    with open("debug_log.txt", "a", encoding="utf-8") as f:
+        f.write(full_message + "\n")
+    
+    output_box.insert(tk.END, message + "\n", color)
+    output_box.tag_config("green", foreground="green")
+    output_box.tag_config("red", foreground="red")
+    output_box.tag_config("blue", foreground="blue")
+    output_box.tag_config("black", foreground="black")
     output_box.see(tk.END)
 
+
 def parse_flexible_date(date_str):
+    # If date_str is already a datetime object, convert it to a string
+    if isinstance(date_str, datetime):
+        return date_str
+
+    # If it's a string, try to parse it
     formats = [
         "%d-%b-%y", "%d/%m/%Y", "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d",
         "%d %B %Y", "%b %d, %Y", "%d.%m.%Y", "%B %d, %Y"
@@ -237,19 +323,18 @@ def parse_flexible_date(date_str):
     for fmt in formats:
         try:
             cleaned = date_str.strip().replace('\ufeff', '')
-            return datetime.strptime(cleaned, fmt).date()
+            return datetime.strptime(cleaned, fmt)  # Return as datetime, not date
         except ValueError:
             continue
     raise ValueError(f"Unsupported date format: '{date_str}'")
 
-
-def process_logbook(csv_path, header_id, cookie, clock_in, clock_out, edit=False):
+def process_logbook(csv_path, cookie, clock_in, clock_out, edit=False, month_header_dict=None):
     log_message(f"Edit mode: {edit}")
-    existing_ids = fetch_existing_entries(header_id, cookie) if edit else {}
-    logbook_entries = []
     handled_dates = set()
     invalid_dates = []
     active_days = 0
+
+    month_entries = defaultdict(list)  # Track entries for each month
 
     try:
         with open(csv_path, newline='', encoding='utf-8') as csvfile:
@@ -271,25 +356,27 @@ def process_logbook(csv_path, header_id, cookie, clock_in, clock_out, edit=False
                 activity_str = activity.strip()
                 if activity_str:
                     try:
+                        date_str = str(date_str)  # Ensure it's a string
                         parsed_date = parse_flexible_date(date_str)
-                        iso_date = parsed_date.strftime('%Y-%m-%dT00:00:00')
+                        iso_date = parsed_date.strftime('%Y-%m-%d')  # Format to YYYY-MM-DD
+
+                        # Get LogBookHeaderID for the current date
+                        header_id = get_header_id_for_date(month_header_dict, parsed_date)
 
                         is_off = parsed_date.weekday() >= 5 or activity_str.strip().lower() == "off"
 
                         if not is_off:
                             active_days += 1
-                            handled_dates.add(parsed_date)
-                            logbook_entries.append({
-                                "model[ID]": existing_ids.get(parsed_date.isoformat(), "00000000-0000-0000-0000-000000000000"),
+                            handled_dates.add(parsed_date.date())
+                            month_entries[parsed_date.month].append({
+                                "model[ID]": None,  # Will be filled in later if edit=True
                                 "model[LogBookHeaderID]": header_id,
                                 "model[ClockIn]": clock_in,
                                 "model[ClockOut]": clock_out,
-                                "model[flagjulyactive]": "false",
-                                'model[Date]': iso_date,
+                                'model[Date]': iso_date,  # Use only the date part
                                 'model[Activity]': activity_str,
                                 'model[Description]': activity_str
                             })
-
 
                     except ValueError as e:
                         invalid_dates.append(f"{date_str} ({e})")
@@ -315,57 +402,88 @@ def process_logbook(csv_path, header_id, cookie, clock_in, clock_out, edit=False
 
     url = "https://activity-enrichment.apps.binus.ac.id/LogBook/StudentSave"
 
-    for data in logbook_entries:
-        try:
-            response = requests.post(url, headers=headers, data=data)
-            date_display = data['model[Date]'][:10]
-            if response.ok:
-                log_message(f"✅ {date_display} submitted successfully.")
-            else:
-                log_message(f"❌ Failed {date_display} - {response.status_code}: {response.text}")
-        except Exception as e:
-            log_message(f"❌ Network error on {data['model[Date]'][:10]}: {e}")
-    
-    # Add "OFF" entries
-    if not handled_dates:
+    # Process each month's data separately
+    for month, entries in month_entries.items():
+        header_id = None
+        for data in entries:
+            try:
+                # Get header_id for the month if not done yet
+                if header_id is None:
+                    header_id = get_header_id_for_date(month_header_dict, data['model[Date]'])
+                existing_ids = fetch_existing_entries(header_id, cookie) if edit else {}
+                data['model[ID]'] = existing_ids.get(data['model[Date]'], "00000000-0000-0000-0000-000000000000")
+                
+                # Submit each entry
+                if not debugging_mode:
+                    response = requests.post(url, headers=headers, data=data)
+                else:
+                    # Create a mock response object with the .ok attribute
+                    class MockResponse:
+                        ok = True
+                        status_code = 200
+                        text = 'Debug mode: simulated response'
+
+                    response = MockResponse()
+
+                date_display = data['model[Date]'][:10]
+                if response.ok:
+                    log_message(f"✅ {date_display} submitted successfully.")
+                else:
+                    log_message(f"❌ Failed {date_display} - {response.status_code}: {response.text}")
+            except Exception as e:
+                log_message(f"❌ Network error on {data['model[Date]'][:10]}: {e}")
+
+    # Add "OFF" entries for each month
+    if len(handled_dates) == 0:
         log_message("⚠️ No dates found in CSV to infer OFF days.")
         return
-    
-    print(handled_dates)
 
-    # Assume one month only
-    first_date = min(handled_dates)
-    year, month = first_date.year, first_date.month
-    all_dates = get_all_days(year, month)
+    # Step 1: Extract month-year pairs from handled_dates
+    month_year_pairs = set((date.year, date.month) for date in handled_dates)
 
-    print(all_dates)
+    # for date in handled_dates:
+    #     print(date)
 
+    # Step 2: For each month-year, generate all days and submit OFF where needed
+    for year, month in month_year_pairs:
+        # Generate all days in the month
+        all_days = get_all_days(year, month)  # Returns list of datetime.date
 
-    # Add "OFF" entries
-    all_dates = get_all_days(year, month)
-    for date in all_dates:
-        if date not in handled_dates:
-            payload = {
-                "model[ID]": existing_ids.get(date.isoformat(), "00000000-0000-0000-0000-000000000000"),
-                "model[LogBookHeaderID]": header_id,
-                "model[Date]": date.isoformat(),
-                "model[Activity]": "OFF",
-                "model[ClockIn]": "OFF",
-                "model[ClockOut]": "OFF",
-                "model[Description]": "OFF",
-                "model[flagjulyactive]": "false"
-            }
+        for day in all_days:
+            if day not in handled_dates:
+                # print(f"{day}")
+                header_id = get_header_id_for_date(month_header_dict, day.isoformat())
 
-            try:
-                response = requests.post(url, data=payload, headers=headers)
-                if response.status_code == 200:
-                    log_message(f"🟡 OFF submitted for {date}.")
-                else:
-                    log_message(f"❌ Failed OFF for {date}: {response.status_code} - {response.text}")
-            except Exception as e:
-                log_message(f"❌ Network error submitting OFF for {date}: {e}")
+                payload = {
+                    "model[ID]": None if not edit else fetch_existing_entries(header_id, cookie).get(day.isoformat(), "00000000-0000-0000-0000-000000000000"),
+                    "model[LogBookHeaderID]": header_id,
+                    "model[Date]": day.isoformat(),
+                    "model[Activity]": "OFF",
+                    "model[ClockIn]": "OFF",
+                    "model[ClockOut]": "OFF",
+                    "model[Description]": "OFF",
+                    "model[flagjulyactive]": "false"
+                }
 
-    log_message("✅ Process complete.")
+                try:
+                    if not debugging_mode:
+                        response = requests.post(url, data=payload, headers=headers)
+                    else:
+                        # Create a mock response object with the .ok attribute
+                        class MockResponse:
+                            ok = True
+                            status_code = 200
+                            text = 'Debug mode: simulated response'
+
+                        response = MockResponse()
+
+                    if response.status_code == 200:
+                        log_message(f"🟡 OFF submitted for {day}.")
+                    else:
+                        log_message(f"❌ Failed OFF for {day}: {response.status_code} - {response.text}")
+                except Exception as e:
+                    log_message(f"❌ Network error submitting OFF for {day}: {e}")
+
 
 
 # === GUI SETUP ===
@@ -377,18 +495,29 @@ def browse_file():
 def start_process():
     output_box.delete(1.0, tk.END)
     file_path = entry_file.get()
-    cookie = entry_cookie.get()
-    header_id = entry_header.get()
     clock_in = entry_clockin.get().strip() or "09:00 am"
     clock_out = entry_clockout.get().strip() or "06:00 pm"
     is_edit = edit_mode.get()
 
-    if not (file_path and cookie and header_id):
+    if not (file_path):
         messagebox.showerror("Missing Info", "Please fill in all fields.")
         return
+    
+    if not (cookie and month_header_dict):
+        if not (month_header_dict or cookie):
+            messagebox.showerror("Missing Cookie and Header ID", "Please click on 'Fetch Cookie & Header ID'")
+        elif cookie:
+            messagebox.showerror("Missing Header ID", "Please click on 'Fetch Cookie & Header ID'")
+        else:
+            messagebox.showerror("Missing Cookie", "Please click on 'Fetch Cookie & Header ID'")
 
-    thread = threading.Thread(target=process_logbook, args=(file_path, header_id, cookie, clock_in, clock_out, is_edit))
+        return
+    
+    
+
+    thread = threading.Thread(target=process_logbook, args=(file_path, cookie, clock_in, clock_out, is_edit, month_header_dict))
     thread.start()
+
 
 
 def get_cookie_and_header():
@@ -409,21 +538,19 @@ def get_cookie_and_header():
             asyncio.set_event_loop(loop)
             try:
                 # Call the async function inside the thread
-                cookie, header = loop.run_until_complete(launch_and_get_cookie_and_header_async(email, password))
+                global cookie, month_header_dict
+                cookie, month_header_dict = loop.run_until_complete(launch_and_get_cookie_and_header_async(email, password))
                 # Update the GUI fields with the fetched data
-                root.after(0, update_gui_fields, cookie, header)
+                root.after(0, update_gui_fields)
             except Exception as e:
                 log_message(f"❌ Failed to get cookie and header: {e}")
+                log_message("❌❌❌ Something went wrong! Please click on 'Fetch Cookies & Header ID' again. 🛠️🔄")
+
         
         # Start the fetch_data function in a new thread
         threading.Thread(target=fetch_data, daemon=True).start()
 
-    def update_gui_fields(cookie, header):
-        # Update the Tkinter fields after the task completes
-        entry_cookie.delete(0, tk.END)
-        entry_cookie.insert(0, cookie)
-        entry_header.delete(0, tk.END)
-        entry_header.insert(0, header or "")
+    def update_gui_fields():
         log_message("✅ Cookie and Header ID retrieved.")
 
     # Try to load saved credentials first
@@ -450,15 +577,7 @@ entry_file = tk.Entry(root, width=50)
 entry_file.grid(row=0, column=1, sticky="w")
 tk.Button(root, text="Browse", command=browse_file).grid(row=0, column=2, sticky="w")
 
-tk.Button(root, text="Auto Fetch Cookie & Header ID", command=get_cookie_and_header, bg="blue", fg="white").grid(row=1, column=0, columnspan=3, pady=(2, 0))
-
-tk.Label(root, text="Header ID:").grid(row=2, column=0, sticky="e")
-entry_header = tk.Entry(root, width=50)
-entry_header.grid(row=2, column=1, columnspan=2, sticky="w")
-
-tk.Label(root, text="Cookie:").grid(row=3, column=0, sticky="e")
-entry_cookie = tk.Entry(root, width=50)
-entry_cookie.grid(row=3, column=1, columnspan=2, sticky="w")
+tk.Button(root, text="Fetch Cookie & Header ID", command=get_cookie_and_header, bg="blue", fg="white").grid(row=1, column=0, columnspan=3, pady=(2, 0))
 
 tk.Label(root, text="Clock In (e.g. 09:00 am):").grid(row=4, column=0, sticky="e")
 entry_clockin = tk.Entry(root, width=15)
