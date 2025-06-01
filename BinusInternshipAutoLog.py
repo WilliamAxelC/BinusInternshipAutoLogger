@@ -5,16 +5,46 @@ import asyncio
 import requests
 import csv
 import os
-from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 import sys
 import json
 from collections import defaultdict
+from utility import get_all_days, parse_flexible_date, convert_to_12h, generate_template
+from datetime import datetime
+import argparse
+import pandas as pd
+import pdb
 
 cookie = None
 month_header_dict = None
 last_browser = None  # Global variable to hold the previous browser instance
-debugging_mode = os.environ.get("DEBUG_MODE", "false").lower() == "true"
+
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description="Run BINUS logbook automation.")
+parser.add_argument("--debug", action="store_true", help="Enable debugging mode.")
+args = parser.parse_args()
+
+debugging_mode = args.debug
+
+def get_header_id_for_date(month_header_dict, date_str):
+    # If date_str is already a datetime object, use it directly
+    if isinstance(date_str, datetime):
+        date_obj = date_str
+    else:
+        # Otherwise, assume it's a string and parse it
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+
+    # Extract the month from the date
+    month_name = date_obj.strftime("%B")  # Get full month name (e.g., "January")
+    month_name = month_name.upper()
+
+    # Retrieve the corresponding headerID for the month
+    header_id = month_header_dict.get(month_name)
+    if not header_id:
+        log_message(f"❌ No headerID found for month: {month_name}")
+        return None
+    return header_id
+
 
 # For PyInstaller -- resolve the path correctly
 def get_runtime_browser_path():
@@ -173,28 +203,8 @@ async def launch_and_get_cookie_and_header_async(email, password):
         log_message(f"  Error in Playwright task: {e}")
         raise
 
-
-def get_header_id_for_date(month_header_dict, date_str):
-    # If date_str is already a datetime object, use it directly
-    if isinstance(date_str, datetime):
-        date_obj = date_str
-    else:
-        # Otherwise, assume it's a string and parse it
-        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-
-    # Extract the month from the date
-    month_name = date_obj.strftime("%B")  # Get full month name (e.g., "January")
-    month_name = month_name.upper()
-
-    # Retrieve the corresponding headerID for the month
-    header_id = month_header_dict.get(month_name)
-    if not header_id:
-        log_message(f"❌ No headerID found for month: {month_name}")
-        return None
-    return header_id
-
 # File to store credentials
-CREDENTIALS_FILE = "data.json"
+DATA_FILE = "data.json"
 
 # Function to save credentials
 def save_credentials(email, password):
@@ -202,18 +212,25 @@ def save_credentials(email, password):
         "email": email,
         "password": password
     }
-    with open(CREDENTIALS_FILE, 'w') as file:
+    with open(DATA_FILE, 'w') as file:
         json.dump(data, file)
 
-# Function to load credentials if available
-def load_credentials():
-    if os.path.exists(CREDENTIALS_FILE):
-        with open(CREDENTIALS_FILE, 'r') as file:
-            data = json.load(file)
+def load_json():
+    try:
+        with open('data.json', 'r') as f:
+            data = json.load(f)
+
+            # Restore CSV path if available
+            saved_path = data.get('csv_path')
+            if saved_path and entry_file:
+                entry_file.delete(0, tk.END)
+                entry_file.insert(0, saved_path)
+
+            # Return credentials if available
             return data.get("email"), data.get("password")
-    return None, None
 
-
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None, None
 
 # Step 2: Tkinter Dialog to get credentials
 class CustomDialog(simpledialog.Dialog):
@@ -246,16 +263,6 @@ def ask_for_credentials(parent, title="Login", prompt1="Enter your email:", prom
     # Ensure dialog has time to finish before proceeding
     dialog = CustomDialog(parent, title, prompt1, prompt2)
     return dialog.result
-
-
-def get_all_days(year, month):
-    first_day = datetime(year, month, 1).date()
-    if month == 12:
-        next_month = datetime(year + 1, 1, 1).date()
-    else:
-        next_month = datetime(year, month + 1, 1).date()
-    delta = next_month - first_day
-    return [first_day + timedelta(days=i) for i in range(delta.days)]
 
 def fetch_existing_entries(header_id, cookie):
     try:
@@ -309,85 +316,77 @@ def log_message(message):
     output_box.tag_config("black", foreground="black")
     output_box.see(tk.END)
 
-
-def parse_flexible_date(date_str):
-    # If date_str is already a datetime object, convert it to a string
-    if isinstance(date_str, datetime):
-        return date_str
-
-    # If it's a string, try to parse it
-    formats = [
-        "%d-%b-%y", "%d/%m/%Y", "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d",
-        "%d %B %Y", "%b %d, %Y", "%d.%m.%Y", "%B %d, %Y"
-    ]
-    for fmt in formats:
-        try:
-            cleaned = date_str.strip().replace('\ufeff', '')
-            return datetime.strptime(cleaned, fmt)  # Return as datetime, not date
-        except ValueError:
-            continue
-    raise ValueError(f"Unsupported date format: '{date_str}'")
-
-def process_logbook(csv_path, cookie, clock_in, clock_out, edit=False, month_header_dict=None):
+def process_logbook(csv_path, cookie, edit=False, month_header_dict=None):
+    # if debugging_mode == True:
+    #     pdb.set_trace()
     log_message(f"Edit mode: {edit}")
     handled_dates = set()
-    invalid_dates = []
+    invalid_rows = []
     active_days = 0
-
-    month_entries = defaultdict(list)  # Track entries for each month
+    month_entries = defaultdict(list)
 
     try:
-        with open(csv_path, newline='', encoding='utf-8') as csvfile:
-            reader = csv.reader(csvfile, delimiter=',')
-            rows = list(reader)
-
-            if len(rows) < 2:
-                log_message("❌ CSV file does not contain enough rows.")
-                return
-
-            date_strs = rows[0]
-            activities = rows[1]
-
-            if not any(cell.strip() for cell in date_strs) or not any(cell.strip() for cell in activities):
-                log_message("❌ CSV appears to be empty or missing required data.")
-                return
-
-            for date_str, activity in zip(date_strs, activities):
-                activity_str = activity.strip()
-                if activity_str:
-                    try:
-                        date_str = str(date_str)  # Ensure it's a string
-                        parsed_date = parse_flexible_date(date_str)
-                        iso_date = parsed_date.strftime('%Y-%m-%d')  # Format to YYYY-MM-DD
-
-                        # Get LogBookHeaderID for the current date
-                        header_id = get_header_id_for_date(month_header_dict, parsed_date)
-
-                        is_off = parsed_date.weekday() >= 5 or activity_str.strip().lower() == "off"
-
-                        if not is_off:
-                            active_days += 1
-                            handled_dates.add(parsed_date.date())
-                            month_entries[parsed_date.month].append({
-                                "model[ID]": None,  # Will be filled in later if edit=True
-                                "model[LogBookHeaderID]": header_id,
-                                "model[ClockIn]": clock_in,
-                                "model[ClockOut]": clock_out,
-                                'model[Date]': iso_date,  # Use only the date part
-                                'model[Activity]': activity_str,
-                                'model[Description]': activity_str
-                            })
-
-                    except ValueError as e:
-                        invalid_dates.append(f"{date_str} ({e})")
-
+        df = pd.read_csv(csv_path, encoding='utf-8-sig')
     except Exception as e:
         log_message(f"❌ Failed to read CSV: {e}")
         return
 
-    if invalid_dates:
-        log_message("❌ Process aborted due to invalid date(s):")
-        for err in invalid_dates:
+    # Normalize column names
+    df.columns = [col.strip().lower() for col in df.columns]
+    required_cols = {"date", "activity", "clockin", "clockout"}
+
+    if not required_cols.issubset(df.columns):
+        log_message("❌ CSV missing required headers: date, activity, clockin, clockout")
+        return
+
+    for idx, row in df.iterrows():
+        try:
+            raw_date = str(row["date"]).strip()
+            activity = str(row["activity"]).strip()
+            clockin = str(row["clockin"]).strip()
+            clockout = str(row["clockout"]).strip()
+
+            if activity.lower() == 'off':
+                clockin, clockout = 'off'
+
+            if not raw_date or not activity:
+                continue  # Skip empty or incomplete rows
+
+            parsed_date = parse_flexible_date(raw_date)
+            header_id = get_header_id_for_date(month_header_dict, parsed_date)
+
+            clockin_12h = convert_to_12h(clockin)
+            clockout_12h = convert_to_12h(clockout)
+
+            is_off = parsed_date.weekday() >= 5 or activity.lower() == "off"
+            date_key = parsed_date.strftime("%Y-%m-%d")
+
+            if not is_off:
+                active_days += 1
+                handled_dates.add(parsed_date.date())
+
+                entry = {
+                    "model[ID]": None,
+                    "model[LogBookHeaderID]": header_id,
+                    "model[ClockIn]": clockin_12h,
+                    "model[ClockOut]": clockout_12h,
+                    "model[Date]": parsed_date.strftime("%Y-%m-%dT00:00:00"),
+                    "model[Activity]": activity,
+                    "model[Description]": activity
+                }
+
+                if edit:
+                    existing_entries = fetch_existing_entries(header_id, cookie)
+                    entry["model[ID]"] = existing_entries.get(date_key, "00000000-0000-0000-0000-000000000000")
+
+                month_entries[parsed_date.month].append(entry)
+
+        except Exception as e:
+            invalid_rows.append(f"{row.to_dict()} ({e})")
+
+    if invalid_rows:
+        log_message("❌ Process aborted due to invalid row(s):")
+        for err in invalid_rows:
             log_message(f"  - {err}")
         return
 
@@ -395,69 +394,55 @@ def process_logbook(csv_path, cookie, clock_in, clock_out, edit=False, month_hea
         log_message("❌ Fewer than 10 Active (non-off) days! Check your CSV file.")
         return
 
+    # Submit active entries
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Cookie": cookie
     }
-
     url = "https://activity-enrichment.apps.binus.ac.id/LogBook/StudentSave"
 
-    # Process each month's data separately
     for month, entries in month_entries.items():
-        header_id = None
-        for data in entries:
+        for entry in entries:
             try:
-                # Get header_id for the month if not done yet
-                if header_id is None:
-                    header_id = get_header_id_for_date(month_header_dict, data['model[Date]'])
-                existing_ids = fetch_existing_entries(header_id, cookie) if edit else {}
-                data['model[ID]'] = existing_ids.get(data['model[Date]'], "00000000-0000-0000-0000-000000000000")
-                
-                # Submit each entry
                 if not debugging_mode:
-                    response = requests.post(url, headers=headers, data=data)
+                    response = requests.post(url, headers=headers, data=entry)
                 else:
-                    # Create a mock response object with the .ok attribute
                     class MockResponse:
                         ok = True
                         status_code = 200
                         text = 'Debug mode: simulated response'
-
                     response = MockResponse()
 
-                date_display = data['model[Date]'][:10]
+                date_display = entry['model[Date]'][:10]
                 if response.ok:
                     log_message(f"✅ {date_display} submitted successfully.")
                 else:
                     log_message(f"❌ Failed {date_display} - {response.status_code}: {response.text}")
             except Exception as e:
-                log_message(f"❌ Network error on {data['model[Date]'][:10]}: {e}")
+                log_message(f"❌ Network error on {entry['model[Date]'][:10]}: {e}")
 
-    # Add "OFF" entries for each month
-    if len(handled_dates) == 0:
+    # Submit OFF entries for missing weekdays
+    if not handled_dates:
         log_message("⚠️ No dates found in CSV to infer OFF days.")
         return
 
-    # Step 1: Extract month-year pairs from handled_dates
-    month_year_pairs = set((date.year, date.month) for date in handled_dates)
+    month_year_pairs = set((d.year, d.month) for d in handled_dates)
 
-    # for date in handled_dates:
-    #     print(date)
-
-    # Step 2: For each month-year, generate all days and submit OFF where needed
     for year, month in month_year_pairs:
-        # Generate all days in the month
-        all_days = get_all_days(year, month)  # Returns list of datetime.date
-
-        for day in all_days:
+        for day in get_all_days(year, month):
             if day not in handled_dates:
-                # print(f"{day}")
                 header_id = get_header_id_for_date(month_header_dict, day.isoformat())
+                date_str = day.strftime("%Y-%m-%dT00:00:00")
+                entry_id = None
+
+                if edit:
+                    existing = fetch_existing_entries(header_id, cookie)
+                    entry_id = existing.get(day.isoformat(), "00000000-0000-0000-0000-000000000000")
 
                 payload = {
-                    "model[ID]": None if not edit else fetch_existing_entries(header_id, cookie).get(day.isoformat(), "00000000-0000-0000-0000-000000000000"),
+                    "model[ID]": entry_id,
                     "model[LogBookHeaderID]": header_id,
-                    "model[Date]": day.isoformat(),
+                    "model[Date]": date_str,
                     "model[Activity]": "OFF",
                     "model[ClockIn]": "OFF",
                     "model[ClockOut]": "OFF",
@@ -469,34 +454,45 @@ def process_logbook(csv_path, cookie, clock_in, clock_out, edit=False, month_hea
                     if not debugging_mode:
                         response = requests.post(url, data=payload, headers=headers)
                     else:
-                        # Create a mock response object with the .ok attribute
                         class MockResponse:
                             ok = True
                             status_code = 200
                             text = 'Debug mode: simulated response'
-
                         response = MockResponse()
 
-                    if response.status_code == 200:
-                        log_message(f"🟡 OFF submitted for {day}.")
+                    if response.ok:
+                        log_message(f"🟡 OFF submitted for {day}")
                     else:
                         log_message(f"❌ Failed OFF for {day}: {response.status_code} - {response.text}")
                 except Exception as e:
                     log_message(f"❌ Network error submitting OFF for {day}: {e}")
 
-
-
 # === GUI SETUP ===
 def browse_file():
     path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
-    entry_file.delete(0, tk.END)
-    entry_file.insert(0, path)
+    if path:
+        entry_file.delete(0, tk.END)
+        entry_file.insert(0, path)
+
+        # Save to data.json
+        try:
+            with open('data.json', 'r') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = {}
+
+        data['csv_path'] = path
+
+        with open('data.json', 'w') as f:
+            json.dump(data, f, indent=4)
+
+
 
 def start_process():
     output_box.delete(1.0, tk.END)
     file_path = entry_file.get()
-    clock_in = entry_clockin.get().strip() or "09:00 am"
-    clock_out = entry_clockout.get().strip() or "06:00 pm"
+    # clock_in = entry_clockin.get().strip() or "09:00 am"
+    # clock_out = entry_clockout.get().strip() or "06:00 pm"
     is_edit = edit_mode.get()
 
     if not (file_path):
@@ -515,10 +511,8 @@ def start_process():
     
     
 
-    thread = threading.Thread(target=process_logbook, args=(file_path, cookie, clock_in, clock_out, is_edit, month_header_dict))
+    thread = threading.Thread(target=process_logbook, args=(file_path, cookie, is_edit, month_header_dict))
     thread.start()
-
-
 
 def get_cookie_and_header():
     def on_credentials_gathered(email, password, remember_me):
@@ -553,8 +547,8 @@ def get_cookie_and_header():
     def update_gui_fields():
         log_message("✅ Cookie and Header ID retrieved.")
 
-    # Try to load saved credentials first
-    email, password = load_credentials()
+    # Try to load saved data first
+    email, password = load_json()
 
     if email and password:
         log_message("✅ Using saved credentials.")
@@ -573,25 +567,30 @@ root.title("BINUS Logbook Submitter")
 edit_mode = tk.BooleanVar()
 
 tk.Label(root, text="Logbook CSV File:").grid(row=0, column=0, sticky="e")
-entry_file = tk.Entry(root, width=50)
-entry_file.grid(row=0, column=1, sticky="w")
-tk.Button(root, text="Browse", command=browse_file).grid(row=0, column=2, sticky="w")
+entry_file = tk.Entry(root, width=80)
+entry_file.grid(row=0, column=1, columnspan=1, sticky="w")
+tk.Button(root, text="Browse", command=browse_file).grid(row=0, column=2, columnspan=1, sticky="w")
 
-tk.Button(root, text="Fetch Cookie & Header ID", command=get_cookie_and_header, bg="blue", fg="white").grid(row=1, column=0, columnspan=3, pady=(2, 0))
+tk.Button(root, text="Fetch Cookie & Header ID", command=get_cookie_and_header, bg="blue", fg="white").grid(row=4, column=1, columnspan=1, pady=4, sticky="w")
 
-tk.Label(root, text="Clock In (e.g. 09:00 am):").grid(row=4, column=0, sticky="e")
-entry_clockin = tk.Entry(root, width=15)
-entry_clockin.insert(0, "09:00 am")
-entry_clockin.grid(row=4, column=1, sticky="w")
+generate_btn = tk.Button(root, text="Generate CSV Template", command=generate_template)
+generate_btn.grid(row=5, column=1, columnspan=1, pady=4, sticky="w")
 
-tk.Label(root, text="Clock Out (e.g. 06:00 pm):").grid(row=5, column=0, sticky="e")
-entry_clockout = tk.Entry(root, width=15)
-entry_clockout.insert(0, "06:00 pm")
-entry_clockout.grid(row=5, column=1, sticky="w")
+load_json()
 
-tk.Checkbutton(root, text="Edit existing entries", variable=edit_mode).grid(row=6, column=0, columnspan=3)
+# tk.Label(root, text="Clock In (e.g. 09:00 am):").grid(row=4, column=0, sticky="e")
+# entry_clockin = tk.Entry(root, width=15)
+# entry_clockin.insert(0, "09:00 am")
+# entry_clockin.grid(row=4, column=1, sticky="w")
 
-tk.Button(root, text="Submit Logbook", command=start_process, bg="green", fg="white").grid(row=7, column=0, columnspan=3, pady=10)
+# tk.Label(root, text="Clock Out (e.g. 06:00 pm):").grid(row=5, column=0, sticky="e")
+# entry_clockout = tk.Entry(root, width=15)
+# entry_clockout.insert(0, "06:00 pm")
+# entry_clockout.grid(row=5, column=1, sticky="w")
+
+tk.Checkbutton(root, text="Edit existing entries", variable=edit_mode).grid(row=6, column=1, columnspan=2, pady=4, sticky="w")
+
+tk.Button(root, text="Submit Logbook", command=start_process, bg="green", fg="white").grid(row=7, column=1, columnspan=2, pady=4, sticky="w")
 
 output_box = scrolledtext.ScrolledText(root, width=80, height=20, state='normal')
 output_box.grid(row=8, column=0, columnspan=3, padx=10, pady=10)
