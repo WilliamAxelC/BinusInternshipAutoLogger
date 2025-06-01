@@ -571,10 +571,10 @@ entry_file = tk.Entry(root, width=80)
 entry_file.grid(row=0, column=1, columnspan=1, sticky="w")
 tk.Button(root, text="Browse", command=browse_file).grid(row=0, column=2, columnspan=1, sticky="w")
 
-tk.Button(root, text="Fetch Cookie & Header ID", command=get_cookie_and_header, bg="blue", fg="white").grid(row=4, column=1, columnspan=1, pady=4, sticky="w")
-
 generate_btn = tk.Button(root, text="Generate CSV Template", command=generate_template)
-generate_btn.grid(row=5, column=1, columnspan=1, pady=4, sticky="w")
+generate_btn.grid(row=4, column=1, columnspan=1, pady=4, sticky="w")
+
+tk.Button(root, text="Fetch Cookie & Header ID", command=get_cookie_and_header, bg="blue", fg="white").grid(row=5, column=1, columnspan=1, pady=4, sticky="w")
 
 load_json()
 
