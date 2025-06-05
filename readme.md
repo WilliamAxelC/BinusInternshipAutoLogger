@@ -1,4 +1,3 @@
-````markdown
 # 📓 BINUS Logbook Submitter
 
 A simple Python GUI tool to automatically submit your BINUS Enrichment logbook entries using a CSV file.
