@@ -5,7 +5,7 @@ a = Analysis(
     ['C:\\Python_Projects\\API-Internship\\BinusInternshipAutoLog.py'],
     pathex=[],
     binaries=[],
-    datas=[('C:\\Users\\willi\\miniconda3\\Lib\\site-packages\\playwright\\driver\\package\\.local-browsers', '.local-browsers/')],
+    datas=[('C:\\Users\\willi\\miniconda3\\Lib\\site-packages\\playwright\\driver\\package\\.local-browsers', '.local-browsers/'), ('logo.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['ODLS.ico'],
+    icon=['logo.ico'],
 )

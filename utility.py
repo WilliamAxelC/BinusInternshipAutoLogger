@@ -32,6 +32,9 @@ def convert_to_12h(time_str):
     Converts time to 12-hour format like '01:45 pm' regardless of input format.
     Accepts both 24-hour ('13:45') and 12-hour ('01:45 pm') formats.
     """
+    if time_str.lower() == "off":
+        return "off"
+
     time_str = time_str.strip().lower()
 
     # Try parsing as 24-hour time first

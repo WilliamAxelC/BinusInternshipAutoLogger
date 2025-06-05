@@ -1,9 +1,8 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, scrolledtext
+from tkinter import filedialog, messagebox, simpledialog, scrolledtext, ttk
 import threading
 import asyncio
 import requests
-import csv
 import os
 from playwright.async_api import async_playwright
 import sys
@@ -13,7 +12,6 @@ from utility import get_all_days, parse_flexible_date, convert_to_12h, generate_
 from datetime import datetime
 import argparse
 import pandas as pd
-import pdb
 
 cookie = None
 month_header_dict = None
@@ -78,7 +76,7 @@ async def launch_and_get_cookie_and_header_async(email, password):
 
             browser = await p.webkit.launch(headless=True)
             last_browser = browser  # Store the reference to this new browser
-            context = await browser.new_context()
+            context = await browser.new_context(viewport={"width": 1920, "height": 1080})
             page = await context.new_page()
 
             # Step 1: Go to the enrichment site
@@ -116,23 +114,33 @@ async def launch_and_get_cookie_and_header_async(email, password):
 
             log_message("   Waiting for 'Go to Activity Enrichment Apps' button...")
 
-            try:
-                # Wait up to 3 minutes for the button to be visible
-                button_selector = 'a.button-orange[href*="/SSOToActivity"]'
-                await page.wait_for_selector(button_selector, timeout=20000, state='visible')
-                log_message("   Button found, scrolling into view and clicking...")
+            button_selector = 'a.button-orange[href*="/SSOToActivity"]'
+            max_attempts = 2
 
-                # Scroll the button into view properly
-                await page.eval_on_selector(button_selector, "el => el.scrollIntoView({ behavior: 'smooth', block: 'center' })")
-                await page.wait_for_timeout(500)  # Allow time for scroll animation
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    log_message(f"   Attempt {attempt} to find and click the button...")
+                    await page.wait_for_selector(button_selector, timeout=10000, state='visible')
+                    log_message("   Button found, scrolling into view and clicking...")
 
-                # Click the button
-                await page.click(button_selector, force=True)
-                log_message("   Clicked 'Go to Activity Enrichment Apps' button.")
-            except Exception as e:
-                log_message(f"   ❌ Button click failed: {e}")
-                log_message("❌❌❌ Something went wrong! Please click on 'Fetch Cookies & Header ID' again. 🛠️🔄")
-                return None, None
+                    # Scroll into view and click
+                    await page.eval_on_selector(button_selector, "el => el.scrollIntoView({ behavior: 'smooth', block: 'center' })")
+                    await page.wait_for_timeout(500)
+                    await page.click(button_selector, force=True)
+                    log_message("   Clicked 'Go to Activity Enrichment Apps' button.")
+                    break  # Exit the loop if successful
+
+                except Exception as e:
+                    log_message(f"   ⚠️ Attempt {attempt} failed: {e}")
+                    if attempt < max_attempts:
+                        log_message("   Refreshing page and retrying...")
+                        await page.reload()
+                        await page.wait_for_timeout(2000)  # Optional wait to allow page to settle
+                    else:
+                        log_message("   ❌ Final attempt failed.")
+                        log_message("❌❌❌ Something went wrong! Please click on 'Fetch Cookies & Header ID' again. 🛠️🔄")
+                        return None, None
+
 
 
             # Step 7: Account selection
@@ -347,7 +355,7 @@ def process_logbook(csv_path, cookie, edit=False, month_header_dict=None):
             clockout = str(row["clockout"]).strip()
 
             if activity.lower() == 'off':
-                clockin, clockout = 'off'
+                clockin = clockout = 'off'
 
             if not raw_date or not activity:
                 continue  # Skip empty or incomplete rows
@@ -355,6 +363,7 @@ def process_logbook(csv_path, cookie, edit=False, month_header_dict=None):
             parsed_date = parse_flexible_date(raw_date)
             header_id = get_header_id_for_date(month_header_dict, parsed_date)
 
+            
             clockin_12h = convert_to_12h(clockin)
             clockout_12h = convert_to_12h(clockout)
 
@@ -390,8 +399,8 @@ def process_logbook(csv_path, cookie, edit=False, month_header_dict=None):
             log_message(f"  - {err}")
         return
 
-    if active_days < 10:
-        log_message("❌ Fewer than 10 Active (non-off) days! Check your CSV file.")
+    if active_days < 5:
+        log_message("❌ Fewer than 5 Active (non-off) days! Check your CSV file.")
         return
 
     # Submit active entries
@@ -427,6 +436,8 @@ def process_logbook(csv_path, cookie, edit=False, month_header_dict=None):
         return
 
     month_year_pairs = set((d.year, d.month) for d in handled_dates)
+
+    print(month_year_pairs)
 
     for year, month in month_year_pairs:
         for day in get_all_days(year, month):
@@ -535,7 +546,9 @@ def get_cookie_and_header():
                 global cookie, month_header_dict
                 cookie, month_header_dict = loop.run_until_complete(launch_and_get_cookie_and_header_async(email, password))
                 # Update the GUI fields with the fetched data
-                root.after(0, update_gui_fields)
+                if cookie is not None and month_header_dict is not None:
+                    root.after(0, update_gui_fields)
+
             except Exception as e:
                 log_message(f"❌ Failed to get cookie and header: {e}")
                 log_message("❌❌❌ Something went wrong! Please click on 'Fetch Cookies & Header ID' again. 🛠️🔄")
@@ -560,39 +573,71 @@ def get_cookie_and_header():
             email, password, remember_me = dialog.result
             on_credentials_gathered(email, password, remember_me)
 
+# === Help Popup ===
+def show_help_popup():
+    help_win = tk.Toplevel(root)
+    help_win.title("How to Use the BINUS Logbook Submitter")
+    help_win.geometry("500x400")
+
+    instructions = (
+        "📘 How to Use:\n\n"
+        "1. 'Generate CSV Template' button\n"
+        "    - Creates a blank CSV file to fill in your daily activities.\n\n"
+        "2. Fill the CSV\n"
+        "    - Enter your logbook entries. Include: date, activity, clock-in, and clock-out.\n\n"
+        "3. 'Fetch Cookie & Header'\n"
+        "    - Opens browser, logs in to BINUS Enrichment, and grabs session info needed for submission.\n\n"
+        "4. 'Edit existing entries'\n"
+        "    - Turn this ON if you want to update already-submitted entries.\n\n"
+        "5. 'Submit Logbook'\n"
+        "    - Submits your entries.\n"
+    )
+
+    text_box = tk.Text(help_win, wrap=tk.WORD, width=60, height=20)
+    text_box.insert(tk.END, instructions)
+    text_box.config(state='disabled')
+    text_box.pack(padx=10, pady=10)
+
+    tk.Button(help_win, text="Close", command=help_win.destroy).pack(pady=(0, 10))
+
 
 # === Build GUI ===
 root = tk.Tk()
 root.title("BINUS Logbook Submitter")
+
+# Get path relative to the executable (for PyInstaller compatibility)
+base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+icon_path = os.path.join(base_path, 'logo.ico')
+
+root.iconbitmap(icon_path)
+
 edit_mode = tk.BooleanVar()
 
+# === Row 0: File Selection ===
 tk.Label(root, text="Logbook CSV File:").grid(row=0, column=0, sticky="e")
 entry_file = tk.Entry(root, width=80)
-entry_file.grid(row=0, column=1, columnspan=1, sticky="w")
-tk.Button(root, text="Browse", command=browse_file).grid(row=0, column=2, columnspan=1, sticky="w")
+entry_file.grid(row=0, column=1, sticky="w")
+tk.Button(root, text="Browse", command=browse_file).grid(row=0, column=2, sticky="w")
 
-generate_btn = tk.Button(root, text="Generate CSV Template", command=generate_template)
-generate_btn.grid(row=4, column=1, columnspan=1, pady=4, sticky="w")
+# === Row 1: Generate CSV Template ===
+tk.Button(root, text="Generate CSV Template", command=generate_template).grid(row=1, column=1, pady=4, sticky="w")
 
-tk.Button(root, text="Fetch Cookie & Header ID", command=get_cookie_and_header, bg="blue", fg="white").grid(row=5, column=1, columnspan=1, pady=4, sticky="w")
+# === Row 2: Fetch Cookie and Header ID ===
+tk.Button(root, text="Fetch Cookie & Header ID", command=get_cookie_and_header, bg="blue", fg="white").grid(row=2, column=1, pady=4, sticky="w")
 
-load_json()
+# === Row 3: Edit Mode Checkbox ===
+tk.Checkbutton(root, text="Edit existing entries (turn this ON to update)", variable=edit_mode).grid(row=3, column=1, pady=4, sticky="w")
 
-# tk.Label(root, text="Clock In (e.g. 09:00 am):").grid(row=4, column=0, sticky="e")
-# entry_clockin = tk.Entry(root, width=15)
-# entry_clockin.insert(0, "09:00 am")
-# entry_clockin.grid(row=4, column=1, sticky="w")
+# === Row 4: Submit Button ===
+tk.Button(root, text="Submit Logbook", command=start_process, bg="green", fg="white").grid(row=4, column=1, pady=4, sticky="w")
 
-# tk.Label(root, text="Clock Out (e.g. 06:00 pm):").grid(row=5, column=0, sticky="e")
-# entry_clockout = tk.Entry(root, width=15)
-# entry_clockout.insert(0, "06:00 pm")
-# entry_clockout.grid(row=5, column=1, sticky="w")
+# === Row 5: Help Button ===
+tk.Button(root, text="❓ How to Use", command=show_help_popup).grid(row=5, column=1, pady=4, sticky="w")
 
-tk.Checkbutton(root, text="Edit existing entries", variable=edit_mode).grid(row=6, column=1, columnspan=2, pady=4, sticky="w")
-
-tk.Button(root, text="Submit Logbook", command=start_process, bg="green", fg="white").grid(row=7, column=1, columnspan=2, pady=4, sticky="w")
-
+# === Row 6: Output Box ===
 output_box = scrolledtext.ScrolledText(root, width=80, height=20, state='normal')
-output_box.grid(row=8, column=0, columnspan=3, padx=10, pady=10)
+output_box.grid(row=6, column=0, columnspan=3, padx=10, pady=10)
 
+# === Load Configs & Start GUI ===
+load_json()
 root.mainloop()

@@ -8,3 +8,4 @@ dist/app.txt
 data.json
 dist/data.json
 build_gui.bat
+__pycache__
